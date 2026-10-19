@@ -1,4 +1,8 @@
+// Module-level allow: the threshold monitor is a circuit-breaker subsystem whose
+// public helpers will be consumed by upcoming guard-rail integration. Per-item
+// annotations would duplicate the same rationale across many items.
 #![allow(dead_code)]
+
 // contracts/program-escrow/src/threshold_monitor.rs
 //
 // Threshold Monitor Module
@@ -57,7 +61,8 @@ impl ThresholdConfig {
     }
 
     pub fn set_time_window_secs(&mut self, val: u64) {
-        self.packed_config = (self.packed_config & !(0xFFFFFF << 16)) | (((val as u64) & 0xFFFFFF) << 16);
+        self.packed_config =
+            (self.packed_config & !(0xFFFFFF << 16)) | (((val as u64) & 0xFFFFFF) << 16);
     }
 
     pub fn cooldown_period_secs(&self) -> u64 {
@@ -65,7 +70,8 @@ impl ThresholdConfig {
     }
 
     pub fn set_cooldown_period_secs(&mut self, val: u64) {
-        self.packed_config = (self.packed_config & !(0xFFFF << 40)) | (((val as u64) & 0xFFFF) << 40);
+        self.packed_config =
+            (self.packed_config & !(0xFFFF << 40)) | (((val as u64) & 0xFFFF) << 40);
     }
 
     pub fn cooldown_multiplier(&self) -> u32 {
@@ -164,9 +170,13 @@ fn persistent_key(key: ThresholdKey) -> (Symbol, ThresholdKey) {
 // Error codes
 // ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub const ERR_THRESHOLD_BREACHED: u32 = 2001;
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub const ERR_INVALID_THRESHOLD_CONFIG: u32 = 2002;
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub const ERR_COOLDOWN_ACTIVE: u32 = 2003;
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub const ERR_WINDOW_NOT_EXPIRED: u32 = 2004;
 
 // ─────────────────────────────────────────────────────────
@@ -193,6 +203,7 @@ pub fn init_threshold_monitor(env: &Env) {
 }
 
 /// Update threshold configuration (admin only - caller must enforce auth)
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn set_threshold_config(env: &Env, config: ThresholdConfig) -> Result<(), u32> {
     // Validate configuration
     config
@@ -238,6 +249,7 @@ pub fn record_operation_success(env: &Env) {
 }
 
 /// Record a failed operation
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn record_operation_failure(env: &Env) {
     rotate_window_if_needed(env);
 
@@ -303,6 +315,7 @@ fn rotate_window_if_needed(env: &Env) {
 // ─────────────────────────────────────────────────────────
 
 /// Check if any thresholds are breached (call before operations)
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn check_thresholds(env: &Env) -> Result<(), ThresholdBreach> {
     rotate_window_if_needed(env);
 
@@ -350,6 +363,7 @@ pub fn check_thresholds(env: &Env) -> Result<(), ThresholdBreach> {
 }
 
 /// Check a single payout amount before execution
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn check_single_payout_threshold(env: &Env, amount: i128) -> Result<(), ThresholdBreach> {
     let config = get_threshold_config(env);
     let now = env.ledger().timestamp();
@@ -374,6 +388,7 @@ pub fn check_single_payout_threshold(env: &Env, amount: i128) -> Result<(), Thre
 // ─────────────────────────────────────────────────────────
 
 /// Check if cooldown period is active
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn is_cooldown_active(env: &Env) -> bool {
     let last_cooldown_end: u64 = env
         .storage()
@@ -386,6 +401,7 @@ pub fn is_cooldown_active(env: &Env) -> bool {
 }
 
 /// Get current cooldown multiplier
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn get_cooldown_multiplier(env: &Env) -> u32 {
     env.storage()
         .persistent()
@@ -394,6 +410,7 @@ pub fn get_cooldown_multiplier(env: &Env) -> u32 {
 }
 
 /// Apply cooldown after circuit opens
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn apply_cooldown(env: &Env) {
     let config = get_threshold_config(env);
     let multiplier = get_cooldown_multiplier(env);
@@ -402,23 +419,27 @@ pub fn apply_cooldown(env: &Env) {
     let cooldown_duration = config.cooldown_period_secs() * (multiplier as u64);
     let cooldown_end = now + cooldown_duration;
 
-    env.storage()
-        .persistent()
-        .set(&persistent_key(ThresholdKey::LastCooldownEnd), &cooldown_end);
+    env.storage().persistent().set(
+        &persistent_key(ThresholdKey::LastCooldownEnd),
+        &cooldown_end,
+    );
 }
 
 /// Increase cooldown multiplier for repeated breaches
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn increase_cooldown_multiplier(env: &Env) {
     let config = get_threshold_config(env);
     let current_multiplier = get_cooldown_multiplier(env);
     let new_multiplier = current_multiplier * config.cooldown_multiplier();
 
-    env.storage()
-        .persistent()
-        .set(&persistent_key(ThresholdKey::CooldownMultiplier), &new_multiplier);
+    env.storage().persistent().set(
+        &persistent_key(ThresholdKey::CooldownMultiplier),
+        &new_multiplier,
+    );
 }
 
 /// Reset cooldown multiplier after stability period
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn reset_cooldown_multiplier(env: &Env) {
     env.storage()
         .persistent()
@@ -430,6 +451,7 @@ pub fn reset_cooldown_multiplier(env: &Env) {
 // ─────────────────────────────────────────────────────────
 
 /// Manually reset metrics (admin only - caller must enforce auth)
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn reset_metrics(env: &Env, admin: &Address) {
     let now = env.ledger().timestamp();
 
@@ -448,6 +470,7 @@ pub fn reset_metrics(env: &Env, admin: &Address) {
 // ─────────────────────────────────────────────────────────
 
 /// Emit threshold breach event
+#[allow(dead_code)] // Intended for future circuit breaker endpoints and configuration
 pub fn emit_threshold_breach_event(env: &Env, breach: &ThresholdBreach) {
     env.events().publish(
         (symbol_short!("th_breach"), breach.metric_type.clone()),

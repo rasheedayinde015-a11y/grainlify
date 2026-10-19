@@ -1,31 +1,54 @@
 # Grainlify Soroban Contracts
 
+## Status: legacy / reference tree
+
+This tree is the **legacy / reference workspace**, not the tree Grainlify develops or deploys contracts from. The **authoritative** tree is [`contracts/`](../contracts/) (Soroban SDK 21.x); this workspace is pinned to Soroban SDK **23.x** and implements its own escrow, program-escrow, and stream contracts against that newer major.
+This Cargo workspace groups [escrow](contracts/escrow/README.md), [program-escrow](contracts/program-escrow/README.md), and [grainlify-stream](contracts/stream/README.md). The workspace manifest itself is not a deployable contract. **No member of this workspace is deployable**: `escrow` and `program-escrow` are both superseded (see the authority notices below), and `grainlify-stream` is a `testutils`-only host-side fixture with no `crate-type`. No live deployment IDs for its contract members are recorded here; the environment example configures testnet access, not deployment.
+
+It is kept for two reasons:
+
+1. **Behavioral parity testing** — the `escrow` contract's test suite deliberately mirrors `contracts/bounty_escrow` behavioral intent (see [Escrow Contract Snapshot Parity](#escrow-contract-snapshot-parity) below).
+2. **SDK 23 reference** — it preserves a working implementation of these contracts on the newer SDK major.
+
+The build-reproducibility workflow builds this workspace's WASM to verify reproducibility, but the deployable WASM that CI gates on (benchmark, gas, and WASM-size-budget gates) comes from `contracts/bounty_escrow` only. No new Grainlify contract work should be opened against this tree. If you are changing shared behavior that both trees implement, change `contracts/` first and mirror the parity tests here only where this tree's tests assert that behavior. The intended end state (including whether the trees converge) is recorded in the [root README](../README.md#contract-workspaces-why-there-are-two-trees).
+
 ## Overview
 
 This repository contains the Soroban smart contract workspace for the Grainlify project.  
 It follows **multi-crate workspace best practices** with separate directories for each contract, allowing modular development and testing.
+
+> **Escrow authority:** the `escrow` crate below is **superseded** and is kept
+> for behavioural parity only; it is not deployed. The authoritative escrow
+> implementation is `contracts/bounty_escrow/contracts/escrow`
+> (`bounty_escrow.wasm`). See
+> [`docs/contracts/escrow-implementation-authority.md`](../docs/contracts/escrow-implementation-authority.md).
+
+> **Program-escrow authority:** the `program-escrow` crate below is
+> **superseded** and is kept for reference only; it is not deployed. The
+> authoritative, deployable program escrow is `contracts/program-escrow`
+> (`program_escrow.wasm`). The two are not interchangeable — this workspace's
+> crate is a program registry/search contract with no payout logic. See
+> [`docs/contracts/program-escrow-implementation-authority.md`](../docs/contracts/program-escrow-implementation-authority.md).
 
 ---
 
 ## Project Structure
 
 ```text
-.
-├── contracts
-│   ├── escrow
-│   │   ├── src
-│   │   │   ├── lib.rs
-│   │   │   └── test.rs
-│   │   └── Cargo.toml
-│   ├── program-escrow
-│   │   ├── src
-│   │   │   ├── lib.rs
-│   │   │   └── test.rs
-│   │   └── Cargo.toml
-│   └── README.md
-├── Cargo.toml          # Workspace-level configuration
-├── .soroban/           # Local network configuration
-└── .env.example        # Example Stellar testnet variables
+soroban/
+|-- Cargo.toml                 # SDK 23 workspace
+|-- README.md
+|-- contracts/
+|   |-- escrow/
+|   |   |-- Cargo.toml
+|   |   \-- README.md
+|   |-- program-escrow/
+|   |   |-- Cargo.toml
+|   |   \-- README.md
+|   \-- stream/
+|       |-- Cargo.toml
+|       \-- README.md
+\-- .env.example              # Testnet configuration example
 ```
 
 # Setup Instructions

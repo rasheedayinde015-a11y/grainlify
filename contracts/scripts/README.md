@@ -58,11 +58,12 @@ stellar keys generate --global grainlify-deployer
 # 2. Fund the account (testnet only)
 stellar keys fund grainlify-deployer --network testnet
 
-# 3. Build contracts
-cd soroban && cargo build --release --target wasm32-unknown-unknown
+# 3. Build the authoritative escrow contract
+cargo build --manifest-path contracts/bounty_escrow/Cargo.toml \
+  --workspace --target wasm32-unknown-unknown --release
 
-# 4. Deploy
-cd .. && ./contracts/scripts/deploy.sh soroban/target/wasm32-unknown-unknown/release/escrow.wasm
+# 4. Deploy (path is resolved relative to contracts/)
+./contracts/scripts/deploy.sh bounty_escrow/target/wasm32-unknown-unknown/release/bounty_escrow.wasm
 ```
 
 ---
@@ -122,10 +123,11 @@ stellar keys fund grainlify-deployer --network testnet
 
 ## Manifest Validation
 
-Schema validation:
+Schema validation uses `contract-manifest-schema.json` as its single source of
+truth. All entrypoints delegate to the same Node validator:
 
-- `validate-manifests.sh` (AJV CLI)
-- `validate-manifests.js` (Node, cross-platform)
+- `validate-manifests.js` (canonical validator)
+- `validate-manifests-simple.js` and `validate-manifests.sh` (compatibility wrappers)
 
 Lightweight manifest + deployment seed validator (no extra deps):
 
@@ -188,8 +190,8 @@ Deploys a new smart contract to the network.
 #### Examples
 
 ```bash
-# Deploy escrow contract to testnet
-./contracts/scripts/deploy.sh soroban/target/wasm32-unknown-unknown/release/escrow.wasm
+# Deploy the authoritative escrow contract to testnet
+./contracts/scripts/deploy.sh bounty_escrow/target/wasm32-unknown-unknown/release/bounty_escrow.wasm
 
 # Deploy with custom name
 ./contracts/scripts/deploy.sh escrow.wasm -N bounty-escrow-v1

@@ -379,35 +379,33 @@ fn check_escrow_states(env: &Env) -> (bool, Vec<UpgradeWarning>) {
             .persistent()
             .has(&crate::DataKey::Escrow(bounty_id))
         {
-            let escrow: Escrow = env
+            if let Some(escrow) = env
                 .storage()
                 .persistent()
-                .get(&crate::DataKey::Escrow(bounty_id))
-                .unwrap();
-
-            // Basic numeric invariants
-            if escrow.amount < 0 || escrow.remaining_amount < 0 {
-                return (false, warnings);
-            }
-            if escrow.remaining_amount > escrow.amount {
-                return (false, warnings);
-            }
-
-            // Status-specific invariants
-            match escrow.status {
-                EscrowStatus::Released => {
-                    if escrow.remaining_amount != 0 {
-                        warnings.push_back(UpgradeWarning {
-                            code: safety_codes::ESCROW_STATE,
-                            message: soroban_sdk::String::from_str(
-                                env,
-                                "Released escrow has non-zero remaining amount",
-                            ),
-                        });
-                    }
+                .get::<_, Escrow>(&crate::DataKey::Escrow(bounty_id))
+            {
+                // Basic numeric invariants
+                if escrow.amount < 0 || escrow.remaining_amount < 0 {
+                    return (false, warnings);
                 }
-                EscrowStatus::Locked => {
-                    if escrow.remaining_amount == 0 {
+                if escrow.remaining_amount > escrow.amount {
+                    return (false, warnings);
+                }
+
+                // Status-specific invariants
+                match escrow.status {
+                    EscrowStatus::Released => {
+                        if escrow.remaining_amount != 0 {
+                            warnings.push_back(UpgradeWarning {
+                                code: safety_codes::ESCROW_STATE,
+                                message: soroban_sdk::String::from_str(
+                                    env,
+                                    "Released escrow has non-zero remaining amount",
+                                ),
+                            });
+                        }
+                    }
+                    EscrowStatus::Locked if escrow.remaining_amount == 0 => {
                         warnings.push_back(UpgradeWarning {
                             code: safety_codes::ESCROW_STATE,
                             message: soroban_sdk::String::from_str(
@@ -416,8 +414,8 @@ fn check_escrow_states(env: &Env) -> (bool, Vec<UpgradeWarning>) {
                             ),
                         });
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -483,13 +481,11 @@ fn check_token_config(env: &Env) -> bool {
 
 fn check_feature_flags(env: &Env) -> bool {
     // Check pause flags if they exist
-    if env.storage().instance().has(&crate::DataKey::PauseFlags) {
-        let flags: crate::PauseFlags = env
-            .storage()
-            .instance()
-            .get(&crate::DataKey::PauseFlags)
-            .unwrap();
-
+    if let Some(flags) = env
+        .storage()
+        .instance()
+        .get::<_, crate::PauseFlags>(&crate::DataKey::PauseFlags)
+    {
         // If contract is fully paused, warn about upgrade
         // This is not a failure but a warning
         if flags.lock_paused {
@@ -503,18 +499,13 @@ fn check_feature_flags(env: &Env) -> bool {
 fn check_no_reentrancy_locks(env: &Env) -> bool {
     // If reentrancy guard exists and is set, it should be cleared
     // A stuck reentrancy guard would prevent contract operation
-    if env
+    if let Some(guard) = env
         .storage()
         .instance()
-        .has(&crate::DataKey::ReentrancyGuard)
+        .get::<_, u32>(&crate::DataKey::ReentrancyGuard)
     {
-        let guard: bool = env
-            .storage()
-            .instance()
-            .get(&crate::DataKey::ReentrancyGuard)
-            .unwrap();
-        if guard {
-            return false; // Reentrancy lock is stuck
+        if guard == 2 {
+            return false; // Reentrancy lock is stuck (ENTERED = 2)
         }
     }
     true

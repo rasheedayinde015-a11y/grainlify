@@ -512,7 +512,10 @@ fn test_error_code_invalid_label_too_long() {
     );
 
     // Create a label that's 33 characters (exceeds MAX_LABEL_LENGTH of 32)
-    let long_label = String::from_str(&env, "this-is-a-very-long-label-that-exceeds-the-maximum-length");
+    let long_label = String::from_str(
+        &env,
+        "this-is-a-very-long-label-that-exceeds-the-maximum-length",
+    );
 
     let res = client.try_register_program_with_labels(
         &1,
@@ -572,10 +575,7 @@ fn test_error_code_label_not_allowed() {
     );
 
     // Set restricted label config
-    client.set_label_config(
-        &true,
-        &vec![&env, String::from_str(&env, "allowed-label")],
-    );
+    client.set_label_config(&true, &vec![&env, String::from_str(&env, "allowed-label")]);
 
     // Try to register with a label not in the allowed list
     let res = client.try_register_program_with_labels(
@@ -849,10 +849,7 @@ fn test_label_error_priority_not_allowed_over_invalid() {
     );
 
     // Set restricted label config
-    client.set_label_config(
-        &true,
-        &vec![&env, String::from_str(&env, "allowed-label")],
-    );
+    client.set_label_config(&true, &vec![&env, String::from_str(&env, "allowed-label")]);
 
     // Try to register with a label not in the allowed list
     let res = client.try_register_program_with_labels(
@@ -966,10 +963,7 @@ fn test_update_labels_not_allowed() {
     client.register_program(&1, &program_admin, &name, &5_000);
 
     // Set restricted label config
-    client.set_label_config(
-        &true,
-        &vec![&env, String::from_str(&env, "allowed-label")],
-    );
+    client.set_label_config(&true, &vec![&env, String::from_str(&env, "allowed-label")]);
 
     let res = client.try_update_program_labels(
         &program_admin,
@@ -1127,4 +1121,406 @@ fn test_get_program_jurisdiction_not_found() {
     // Error code 4 = ProgramNotFound
     let err = res.err().unwrap();
     assert_eq!(err, Ok(Error::ProgramNotFound));
+}
+
+// ==================== ISSUE #1807 — CALLBACK DEPTH TESTS ====================
+
+#[test]
+fn test_normal_registration_callback_depth_not_exceeded() {
+    // A standard single registration completes without triggering the depth limit.
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    let res = client.try_register_program(
+        &1,
+        &program_admin,
+        &String::from_str(&env, "Normal Registration"),
+        &5_000,
+    );
+    assert!(
+        res.is_ok(),
+        "Normal single-callback registration must succeed"
+    );
+}
+
+#[test]
+fn test_normal_registration_with_jurisdiction_callback_not_exceeded() {
+    // Jurisdiction registration also goes through a single token transfer
+    // and must not trip the depth guard.
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        20_000i128
+    );
+
+    let cfg = ProgramJurisdictionConfig {
+        tag: Some(String::from_str(&env, "test-zone")),
+        requires_kyc: false,
+        max_funding: Some(15_000),
+        registration_paused: false,
+    };
+
+    let res = client.try_register_program_juris(
+        &1,
+        &program_admin,
+        &String::from_str(&env, "Juris Normal"),
+        &5_000,
+        &cfg.tag.clone(),
+        &cfg.requires_kyc,
+        &cfg.max_funding.clone(),
+        &cfg.registration_paused,
+        &OptionalJurisdiction::Some(cfg.clone()),
+        &None,
+    );
+    assert!(res.is_ok(), "Jurisdiction registration must succeed");
+}
+
+#[test]
+fn test_callback_depth_error_code_is_stable() {
+    // Verify the CallbackDepthExceeded error variant has the expected
+    // numeric code (18) for stable client discrimination.
+    let code = Error::CallbackDepthExceeded as u32;
+    assert_eq!(code, 18, "CallbackDepthExceeded must remain error code 18");
+}
+
+#[test]
+fn test_multiple_sequential_registrations_do_not_accumulate_depth() {
+    // Each registration must release the depth counter, so sequential
+    // registrations must all succeed independently.
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        token_admin,
+        100_000i128
+    );
+
+    for i in 1u64..=5 {
+        token_admin.mint(&program_admin, &1_000);
+        let res = client.try_register_program(
+            &i,
+            &program_admin,
+            &String::from_str(&env, "Sequential Program"),
+            &1_000,
+        );
+        assert!(
+            res.is_ok(),
+            "Registration {} must succeed — depth counter must have been released",
+            i
+        );
+    }
+}
+
+#[test]
+fn test_depth_counter_rolled_back_on_failed_registration() {
+    // When a registration fails (e.g. invalid amount), no partial state should
+    // persist and a subsequent valid registration should succeed, proving that
+    // the depth counter is properly rolled back on error.
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    // Intentional failure: amount = 0 is invalid.
+    let _ = client.try_register_program(
+        &1,
+        &program_admin,
+        &String::from_str(&env, "Bad Amount"),
+        &0,
+    );
+
+    // Subsequent valid registration must succeed — depth counter rolled back.
+    let res = client.try_register_program(
+        &2,
+        &program_admin,
+        &String::from_str(&env, "Good Amount"),
+        &5_000,
+    );
+    assert!(
+        res.is_ok(),
+        "Registration after a failed call must succeed; depth counter must be rolled back"
+    );
+}
+
+// ==================== ISSUE #1811 — ADDRESS VALIDATION TESTS ====================
+
+#[test]
+fn test_error_code_invalid_address_contract_self_as_admin() {
+    setup!(
+        env,
+        client,
+        contract_id,
+        _admin,
+        _program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    let res = client.try_register_program(
+        &1,
+        &contract_id,
+        &String::from_str(&env, "Self-referencing Program"),
+        &5_000,
+    );
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert_eq!(err, Ok(Error::InvalidAddress));
+}
+
+#[test]
+fn test_valid_address_passes_validation() {
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    let res = client.try_register_program(
+        &1,
+        &program_admin,
+        &String::from_str(&env, "Valid Program"),
+        &5_000,
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn test_error_code_invalid_address_self_as_juris_admin() {
+    setup!(
+        env,
+        client,
+        contract_id,
+        _admin,
+        _program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    let cfg = ProgramJurisdictionConfig {
+        tag: Some(String::from_str(&env, "test")),
+        requires_kyc: false,
+        max_funding: Some(10_000),
+        registration_paused: false,
+    };
+
+    let res = client.try_register_program_juris(
+        &2,
+        &contract_id,
+        &String::from_str(&env, "Juris Program"),
+        &5_000,
+        &cfg.tag.clone(),
+        &cfg.requires_kyc,
+        &cfg.max_funding.clone(),
+        &cfg.registration_paused,
+        &OptionalJurisdiction::Some(cfg.clone()),
+        &None,
+    );
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert_eq!(err, Ok(Error::InvalidAddress));
+}
+
+#[test]
+fn test_address_validation_is_consistent_across_write_and_query_paths() {
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    client.register_program(
+        &100,
+        &program_admin,
+        &String::from_str(&env, "Consistent Addr Program"),
+        &5_000,
+    );
+
+    let program = client.get_program(&100);
+    assert_eq!(program.admin, program_admin);
+}
+
+#[test]
+fn test_regression_malformed_address_boundary_inputs() {
+    setup!(
+        env,
+        client,
+        contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    assert_eq!(
+        client
+            .try_register_program(
+                &200,
+                &contract_id,
+                &String::from_str(&env, "Boundary Test"),
+                &100,
+            )
+            .err()
+            .unwrap(),
+        Ok(Error::InvalidAddress)
+    );
+
+    assert!(client
+        .try_register_program(
+            &201,
+            &program_admin,
+            &String::from_str(&env, "Normal Address"),
+            &100,
+        )
+        .is_ok());
+}
+
+// ==================== ISSUE #1810 — FAIL-CLOSED CONFIGURATION TESTS ====================
+
+#[test]
+fn test_error_code_missing_configuration_uninitialized_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(ProgramEscrowContract, ());
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let some_admin = Address::generate(&env);
+
+    let res = client.try_register_program(
+        &1,
+        &some_admin,
+        &String::from_str(&env, "No Config Program"),
+        &100,
+    );
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert_eq!(err, Ok(Error::NotInitialized));
+}
+
+#[test]
+fn test_fail_closed_fresh_deployment_no_registration_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(ProgramEscrowContract, ());
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let some_admin = Address::generate(&env);
+
+    let res = client.try_register_program(&1, &some_admin, &String::from_str(&env, "Test"), &100);
+    assert!(res.is_err());
+    assert_eq!(res.err().unwrap(), Ok(Error::NotInitialized));
+
+    let items = vec![
+        &env,
+        ProgramRegistrationItem {
+            program_id: 2,
+            admin: some_admin,
+            name: String::from_str(&env, "Batch Test"),
+            total_funding: 100,
+        },
+    ];
+    let batch_res = client.try_batch_register_programs(&items);
+    assert!(batch_res.is_err());
+    assert_eq!(batch_res.err().unwrap(), Ok(Error::NotInitialized));
+}
+
+#[test]
+fn test_fail_closed_fully_initialized_allows_registration() {
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    let res = client.try_register_program(
+        &1,
+        &program_admin,
+        &String::from_str(&env, "Fully Initialized"),
+        &5_000,
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn test_optional_vs_mandatory_configuration_distinction() {
+    setup!(
+        env,
+        client,
+        _contract_id,
+        _admin,
+        _program_admin,
+        _token_client,
+        _token_admin,
+        10_000i128
+    );
+
+    let config = client.get_label_config();
+    assert!(!config.restricted);
+    assert_eq!(config.allowed_labels.len(), 0);
+
+    let allowed = vec![&env, String::from_str(&env, "grant")];
+    client.set_label_config(&true, &allowed);
+    let updated = client.get_label_config();
+    assert!(updated.restricted);
+    assert_eq!(updated.allowed_labels.len(), 1);
+}
+
+#[test]
+fn test_error_behavior_stable_for_clients() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(ProgramEscrowContract, ());
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let some_addr = Address::generate(&env);
+
+    let r1 = client
+        .try_register_program(&1, &some_addr, &String::from_str(&env, "T"), &100)
+        .err()
+        .unwrap();
+    let r2 = client
+        .try_register_program(&1, &some_addr, &String::from_str(&env, "T"), &100)
+        .err()
+        .unwrap();
+
+    assert_eq!(r1, r2);
+    assert_eq!(r1, Ok(Error::NotInitialized));
 }

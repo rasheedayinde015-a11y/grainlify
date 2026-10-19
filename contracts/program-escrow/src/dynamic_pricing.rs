@@ -53,7 +53,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Bytes};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, Env, String, Symbol};
 
 // ============================================================================
 // Constants
@@ -96,34 +96,34 @@ const TIME_DECAY_RATE_BPS: i128 = 10; // 0.1% per hour
 pub struct DynamicPricingConfig {
     /// Whether dynamic pricing is enabled
     pub enabled: bool,
-    
+
     /// Base fee rate (in basis points)
     pub base_fee_bps: i128,
-    
+
     /// Maximum fee rate (in basis points)
     pub max_fee_bps: i128,
-    
+
     /// Minimum fee rate (in basis points)
     pub min_fee_bps: i128,
-    
+
     /// Maximum price change per period (basis points)
     pub max_change_bps: i128,
-    
+
     /// Price smoothing factor (basis points)
     pub smoothing_alpha_bps: i128,
-    
+
     /// Minimum update interval (seconds)
     pub min_update_interval: u64,
-    
+
     /// Oracle address (if using external oracle)
     pub oracle_address: Option<Address>,
-    
+
     /// Whether to use demand-based pricing
     pub use_demand_pricing: bool,
-    
+
     /// Whether to use supply-based pricing
     pub use_supply_pricing: bool,
-    
+
     /// Whether to use time-decay pricing
     pub use_time_decay: bool,
 }
@@ -152,25 +152,25 @@ impl DynamicPricingConfig {
 pub struct PricingState {
     /// Current fee rate (in basis points)
     pub current_fee_bps: i128,
-    
+
     /// Previous fee rate (in basis points)
     pub previous_fee_bps: i128,
-    
+
     /// Exponential moving average of fee rate
     pub ema_fee_bps: i128,
-    
+
     /// Last update timestamp
     pub last_update: u64,
-    
+
     /// Number of price updates
     pub update_count: u64,
-    
+
     /// Current demand score (0-10000 basis points)
     pub demand_score: i128,
-    
+
     /// Current supply score (0-10000 basis points)
     pub supply_score: i128,
-    
+
     /// Time decay factor (in basis points)
     pub time_decay_factor: i128,
 }
@@ -184,8 +184,8 @@ impl PricingState {
             ema_fee_bps: base_fee_bps,
             last_update: timestamp,
             update_count: 0,
-            demand_score: 5000, // 50% neutral
-            supply_score: 5000, // 50% neutral
+            demand_score: 5000,       // 50% neutral
+            supply_score: 5000,       // 50% neutral
             time_decay_factor: 10000, // 100% (no decay initially)
         }
     }
@@ -197,19 +197,19 @@ impl PricingState {
 pub struct OracleMarketData {
     /// Token price (in smallest units)
     pub token_price: i128,
-    
+
     /// 24h volume (in smallest units)
     pub volume_24h: i128,
-    
+
     /// Market cap (in smallest units)
     pub market_cap: i128,
-    
+
     /// Volatility index (in basis points)
     pub volatility_bps: i128,
-    
+
     /// Timestamp of data
     pub timestamp: u64,
-    
+
     /// Oracle signature or proof
     pub signature: Option<Bytes>,
 }
@@ -220,16 +220,16 @@ pub struct OracleMarketData {
 pub struct DemandMetrics {
     /// Transaction count in current window
     pub tx_count: u64,
-    
+
     /// Total volume in current window
     pub total_volume: i128,
-    
+
     /// Unique users in current window
     pub unique_users: u64,
-    
+
     /// Average transaction size
     pub avg_tx_size: i128,
-    
+
     /// Growth rate vs previous window (basis points)
     pub growth_rate_bps: i128,
 }
@@ -240,13 +240,13 @@ pub struct DemandMetrics {
 pub struct SupplyMetrics {
     /// Total liquidity available
     pub total_liquidity: i128,
-    
+
     /// Utilization rate (basis points)
     pub utilization_bps: i128,
-    
+
     /// Available liquidity
     pub available_liquidity: i128,
-    
+
     /// Locked liquidity
     pub locked_liquidity: i128,
 }
@@ -312,8 +312,10 @@ impl PricingEngine {
         // Apply demand-based adjustment
         if config.use_demand_pricing {
             if let Some(demand) = demand_metrics {
-                let demand_adj = Self::calculate_demand_adjustment(env, config, demand, state);
-                fee_bps = fee_bps.saturating_add(demand_adj);
+                let demand_adj = Self::calculate_demand_adjustment(env, config, demand, state)?;
+                fee_bps = fee_bps
+                    .checked_add(demand_adj)
+                    .ok_or(ContractError::PricingCalculationOverflow)?;
                 calculation.demand_adjustment = demand_adj;
             }
         }
@@ -321,23 +323,29 @@ impl PricingEngine {
         // Apply supply-based adjustment
         if config.use_supply_pricing {
             if let Some(supply) = supply_metrics {
-                let supply_adj = Self::calculate_supply_adjustment(env, config, supply, state);
-                fee_bps = fee_bps.saturating_add(supply_adj);
+                let supply_adj = Self::calculate_supply_adjustment(env, config, supply, state)?;
+                fee_bps = fee_bps
+                    .checked_add(supply_adj)
+                    .ok_or(ContractError::PricingCalculationOverflow)?;
                 calculation.supply_adjustment = supply_adj;
             }
         }
 
         // Apply time-decay adjustment
         if config.use_time_decay {
-            let time_adj = Self::calculate_time_decay_adjustment(env, config, state);
-            fee_bps = fee_bps.saturating_add(time_adj);
+            let time_adj = Self::calculate_time_decay_adjustment(env, config, state)?;
+            fee_bps = fee_bps
+                .checked_add(time_adj)
+                .ok_or(ContractError::PricingCalculationOverflow)?;
             calculation.time_decay_adjustment = time_adj;
         }
 
         // Apply oracle adjustment if available
         if let Some(oracle) = oracle_data {
             let oracle_adj = Self::calculate_oracle_adjustment(env, config, oracle, state)?;
-            fee_bps = fee_bps.saturating_add(oracle_adj);
+            fee_bps = fee_bps
+                .checked_add(oracle_adj)
+                .ok_or(ContractError::PricingCalculationOverflow)?;
             calculation.oracle_adjustment = Some(oracle_adj);
         }
 
@@ -347,7 +355,7 @@ impl PricingEngine {
         fee_bps = fee_bps.max(config.min_fee_bps).min(config.max_fee_bps);
 
         // Apply price smoothing (EMA)
-        let smoothed = Self::apply_price_smoothing(env, config, state, fee_bps);
+        let smoothed = Self::apply_price_smoothing(env, config, state, fee_bps)?;
         calculation.smoothed_fee_bps = smoothed;
 
         // Apply change limits
@@ -363,20 +371,44 @@ impl PricingEngine {
         _config: &DynamicPricingConfig,
         demand: &DemandMetrics,
         state: &PricingState,
-    ) -> i128 {
+    ) -> Result<i128, ContractError> {
         // Calculate demand score based on transaction metrics
-        let tx_score = (demand.tx_count as i128 * 10).min(10000); // Scale to 0-10000
+        let tx_score = (demand.tx_count as i128)
+            .checked_mul(10)
+            .ok_or(ContractError::PricingCalculationOverflow)?
+            .min(10000); // Scale to 0-10000
         let volume_score = (demand.total_volume / 1_000_000).min(10000); // Normalize volume
-        let growth_score = demand.growth_rate_bps.abs().min(10000);
+        let growth_score = demand
+            .growth_rate_bps
+            .checked_abs()
+            .ok_or(ContractError::PricingCalculationOverflow)?
+            .min(10000);
 
         // Combine scores with weights
-        let combined_score = (tx_score * 3 + volume_score * 2 + growth_score * 1) / 6;
+        let tx_weight = tx_score
+            .checked_mul(3)
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+        let vol_weight = volume_score
+            .checked_mul(2)
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+        let growth_weight = growth_score
+            .checked_mul(1)
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+
+        let combined_score = tx_weight
+            .checked_add(vol_weight)
+            .and_then(|v| v.checked_add(growth_weight))
+            .ok_or(ContractError::PricingCalculationOverflow)?
+            / 6;
 
         // Calculate adjustment based on deviation from neutral (5000 bps)
         let deviation = combined_score.saturating_sub(5000);
-        
+
         // Apply sensitivity factor
-        deviation * DEMAND_SENSITIVITY / 10000
+        deviation
+            .checked_mul(DEMAND_SENSITIVITY)
+            .and_then(|v| v.checked_div(10000))
+            .ok_or(ContractError::PricingCalculationOverflow)
     }
 
     /// Calculate supply-based price adjustment
@@ -385,19 +417,27 @@ impl PricingEngine {
         _config: &DynamicPricingConfig,
         supply: &SupplyMetrics,
         _state: &PricingState,
-    ) -> i128 {
+    ) -> Result<i128, ContractError> {
         // Higher utilization = higher fees
         let utilization = supply.utilization_bps;
-        
+
         // Calculate adjustment based on utilization
         // If utilization > 50%, increase fees
         if utilization > 5000 {
             let excess = utilization.saturating_sub(5000);
-            excess * SUPPLY_SENSITIVITY / 10000
+            excess
+                .checked_mul(SUPPLY_SENSITIVITY)
+                .and_then(|v| v.checked_div(10000))
+                .ok_or(ContractError::PricingCalculationOverflow)
         } else {
             // If utilization < 50%, decrease fees
             let deficit = 5000_i128.saturating_sub(utilization);
-            -(deficit * SUPPLY_SENSITIVITY / 10000)
+            let adj = deficit
+                .checked_mul(SUPPLY_SENSITIVITY)
+                .and_then(|v| v.checked_div(10000))
+                .ok_or(ContractError::PricingCalculationOverflow)?;
+            adj.checked_neg()
+                .ok_or(ContractError::PricingCalculationOverflow)
         }
     }
 
@@ -406,19 +446,24 @@ impl PricingEngine {
         env: &Env,
         _config: &DynamicPricingConfig,
         state: &PricingState,
-    ) -> i128 {
+    ) -> Result<i128, ContractError> {
         let current_time = env.ledger().timestamp();
         let hours_passed = current_time.saturating_sub(state.last_update) / 3600;
-        
+
         if hours_passed == 0 {
-            return 0;
+            return Ok(0);
         }
 
         // Apply decay factor
-        let decay = (hours_passed as i128 * TIME_DECAY_RATE_BPS) / 10000;
-        
+        let decay = (hours_passed as i128)
+            .checked_mul(TIME_DECAY_RATE_BPS)
+            .and_then(|v| v.checked_div(10000))
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+
         // Decay reduces fees over time (negative adjustment)
-        -decay
+        decay
+            .checked_neg()
+            .ok_or(ContractError::PricingCalculationOverflow)
     }
 
     /// Calculate oracle-based price adjustment
@@ -442,11 +487,19 @@ impl PricingEngine {
 
         // Calculate adjustment based on volatility
         // Higher volatility = higher fees to account for risk
-        let volatility_adj = (oracle.volatility_bps * 50) / 10000; // 50% of volatility as adjustment
+        let volatility_adj = oracle
+            .volatility_bps
+            .checked_mul(50)
+            .and_then(|v| v.checked_div(10000))
+            .ok_or(ContractError::PricingCalculationOverflow)?; // 50% of volatility as adjustment
 
         // Calculate deviation from moving average
         let deviation = oracle.volatility_bps.saturating_sub(5000);
-        if deviation.abs() > MAX_DEVIATION_BPS {
+        if deviation
+            .checked_abs()
+            .ok_or(ContractError::PricingCalculationOverflow)?
+            > MAX_DEVIATION_BPS
+        {
             return Err(ContractError::OracleDataInvalid);
         }
 
@@ -459,15 +512,25 @@ impl PricingEngine {
         config: &DynamicPricingConfig,
         state: &PricingState,
         new_fee: i128,
-    ) -> i128 {
+    ) -> Result<i128, ContractError> {
         // EMA formula: EMA = (alpha * new) + ((1 - alpha) * old_EMA)
         let alpha = config.smoothing_alpha_bps;
         let one_minus_alpha = 10000_i128.saturating_sub(alpha);
-        
-        let weighted_new = (new_fee * alpha) / 10000;
-        let weighted_old = (state.ema_fee_bps * one_minus_alpha) / 10000;
-        
-        weighted_new.saturating_add(weighted_old)
+
+        let weighted_new = new_fee
+            .checked_mul(alpha)
+            .and_then(|v| v.checked_div(10000))
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+
+        let weighted_old = state
+            .ema_fee_bps
+            .checked_mul(one_minus_alpha)
+            .and_then(|v| v.checked_div(10000))
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+
+        weighted_new
+            .checked_add(weighted_old)
+            .ok_or(ContractError::PricingCalculationOverflow)
     }
 
     /// Apply maximum change limits
@@ -484,12 +547,20 @@ impl PricingEngine {
         }
 
         // Calculate percentage change
-        let change = new_fee.saturating_sub(state.current_fee_bps);
-        let change_abs = change.abs();
-        
+        let change = new_fee
+            .checked_sub(state.current_fee_bps)
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+        let change_abs = change
+            .checked_abs()
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+
         // Calculate max allowed change
-        let max_change = (state.current_fee_bps * config.max_change_bps) / 10000;
-        
+        let max_change = state
+            .current_fee_bps
+            .checked_mul(config.max_change_bps)
+            .and_then(|v| v.checked_div(10000))
+            .ok_or(ContractError::PricingCalculationOverflow)?;
+
         if change_abs > max_change {
             return Err(ContractError::PriceChangeExceedsLimit);
         }
@@ -498,10 +569,7 @@ impl PricingEngine {
     }
 
     /// Validate oracle data
-    pub fn validate_oracle_data(
-        env: &Env,
-        oracle: &OracleMarketData,
-    ) -> Result<(), ContractError> {
+    pub fn validate_oracle_data(env: &Env, oracle: &OracleMarketData) -> Result<(), ContractError> {
         // Check data freshness
         let current_time = env.ledger().timestamp();
         if current_time.saturating_sub(oracle.timestamp) > ORACLE_STALENESS_THRESHOLD {

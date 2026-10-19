@@ -7,6 +7,7 @@ pub enum ClaimStatus {
     Pending,
     Completed,
     Cancelled,
+    Expired,
 }
 
 #[contracttype]
@@ -27,7 +28,11 @@ const CLAIM_CANCELLED: Symbol = symbol_short!("ClmCncl");
 const NEXT_CLAIM_ID: Symbol = symbol_short!("NxtClmId");
 
 fn next_claim_id(env: &Env) -> u64 {
-    let id: u64 = env.storage().instance().get(&NEXT_CLAIM_ID).unwrap_or(1_u64);
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&NEXT_CLAIM_ID)
+        .unwrap_or(1_u64);
     env.storage().instance().set(&NEXT_CLAIM_ID, &(id + 1));
     id
 }
@@ -57,6 +62,16 @@ fn require_admin(env: &Env, caller: &Address) {
         panic!("Unauthorized");
     }
     caller.require_auth();
+}
+
+fn is_claim_active(record: &ClaimRecord, env: &Env) -> bool {
+    record.status == ClaimStatus::Pending && env.ledger().timestamp() < record.claim_deadline
+}
+
+fn claim_has_expired(record: &ClaimRecord, env: &Env) -> bool {
+    record.status == ClaimStatus::Expired
+        || (record.status == ClaimStatus::Pending
+            && env.ledger().timestamp() >= record.claim_deadline)
 }
 
 /// Creates a pending claim, reserving `amount` from the escrow balance.
@@ -96,10 +111,18 @@ pub fn create_pending_claim(
         status: ClaimStatus::Pending,
     };
 
-    env.storage().persistent().set(&claim_key(program_id, claim_id), &record);
+    env.storage()
+        .persistent()
+        .set(&claim_key(program_id, claim_id), &record);
     env.events().publish(
         (CLAIM_CREATED,),
-        (program_id.clone(), claim_id, recipient.clone(), amount, claim_deadline),
+        (
+            program_id.clone(),
+            claim_id,
+            recipient.clone(),
+            amount,
+            claim_deadline,
+        ),
     );
 
     claim_id
@@ -119,12 +142,11 @@ pub fn execute_claim(env: &Env, program_id: &String, claim_id: u64, caller: &Add
     if record.recipient != *caller {
         panic!("Unauthorized: only the claim recipient can execute this claim");
     }
-    match record.status {
-        ClaimStatus::Pending => {}
-        _ => panic!("ClaimAlreadyProcessed"),
-    }
-    if env.ledger().timestamp() > record.claim_deadline {
+    if claim_has_expired(&record, env) {
         panic!("ClaimExpired");
+    }
+    if !is_claim_active(&record, env) {
+        panic!("ClaimAlreadyProcessed");
     }
 
     let program = get_program(env);
@@ -138,7 +160,12 @@ pub fn execute_claim(env: &Env, program_id: &String, claim_id: u64, caller: &Add
     env.storage().persistent().set(&key, &record);
     env.events().publish(
         (CLAIM_EXECUTED,),
-        (program_id.clone(), claim_id, record.recipient.clone(), record.amount),
+        (
+            program_id.clone(),
+            claim_id,
+            record.recipient.clone(),
+            record.amount,
+        ),
     );
 }
 
@@ -154,7 +181,7 @@ pub fn cancel_claim(env: &Env, program_id: &String, claim_id: u64, admin: &Addre
         .unwrap_or_else(|| panic!("Claim not found"));
 
     match record.status {
-        ClaimStatus::Pending => {}
+        ClaimStatus::Pending | ClaimStatus::Expired => {}
         _ => panic!("ClaimAlreadyProcessed"),
     }
 
@@ -166,22 +193,36 @@ pub fn cancel_claim(env: &Env, program_id: &String, claim_id: u64, admin: &Addre
     env.storage().persistent().set(&key, &record);
     env.events().publish(
         (CLAIM_CANCELLED,),
-        (program_id.clone(), claim_id, record.recipient.clone(), record.amount),
+        (
+            program_id.clone(),
+            claim_id,
+            record.recipient.clone(),
+            record.amount,
+        ),
     );
 }
 
 /// Returns a claim record by its ID. Panics if the claim does not exist.
 pub fn get_claim(env: &Env, program_id: &String, claim_id: u64) -> ClaimRecord {
-    env.storage()
+    let key = claim_key(program_id, claim_id);
+    let mut record: ClaimRecord = env
+        .storage()
         .persistent()
-        .get(&claim_key(program_id, claim_id))
-        .unwrap_or_else(|| panic!("Claim not found"))
+        .get(&key)
+        .unwrap_or_else(|| panic!("Claim not found"));
+    if record.status == ClaimStatus::Pending && env.ledger().timestamp() >= record.claim_deadline {
+        record.status = ClaimStatus::Expired;
+        env.storage().persistent().set(&key, &record);
+    }
+    record
 }
 
 /// Sets the global default claim window in seconds. Admin only.
 pub fn set_claim_window(env: &Env, admin: &Address, window_seconds: u64) {
     require_admin(env, admin);
-    env.storage().instance().set(&DataKey::ClaimWindow, &window_seconds);
+    env.storage()
+        .instance()
+        .set(&DataKey::ClaimWindow, &window_seconds);
 }
 
 /// Returns the global default claim window in seconds (default: 86400).

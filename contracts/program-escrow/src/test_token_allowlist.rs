@@ -17,17 +17,20 @@
 //! - Admin-only guard on add / remove
 //! - Deterministic ordering: rejection happens before program storage write
 //! - Immutable configured decimals and live `decimals()` mismatch telemetry
+//! - Update hardening: duplicate remove, immutable-scale re-add, stale-admin
+//!   rejection after rotation, and payout on a program whose token was later
+//!   de-listed (grandfathered — enforcement is at `init_program` only)
 
 #![cfg(test)]
 
 use crate::{
-    ProgramEscrowContract, ProgramEscrowContractClient, TokenAllowlistSchemaVersionSet,
-    TokenAllowlistUpdatedEvent, TokenDecimalsMismatchEvent, TokenRejectedEvent, EVENT_VERSION_V2,
-    TOKEN_ALLOWLIST_SCHEMA_VERSION_V1,
+    errors::ContractError, ProgramEscrowContract, ProgramEscrowContractClient,
+    TokenAllowlistSchemaVersionSet, TokenAllowlistUpdatedEvent, TokenDecimalsMismatchEvent,
+    TokenRejectedEvent, EVENT_VERSION_V2, TOKEN_ALLOWLIST_SCHEMA_VERSION_V1,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
-    token, Address, Env, String, Symbol, TryIntoVal,
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
+    token, Address, Env, IntoVal, String, Symbol, TryIntoVal,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +60,17 @@ fn init_with_token(client: &ProgramEscrowContractClient, env: &Env, token: &Addr
     let program_id = String::from_str(env, "test-prog");
     let admin = Address::generate(env);
     client.init_program(&program_id, &admin, token, &admin, &None, &None);
+}
+
+/// Look up a token's configured decimal scale via the V2 allowlist snapshot.
+/// Returns `None` when the token is not listed.
+fn token_decimals(client: &ProgramEscrowContractClient, token: &Address) -> Option<u32> {
+    for entry in client.get_allowed_tokens_with_decimals().iter() {
+        if entry.token == *token {
+            return Some(entry.decimals);
+        }
+    }
+    None
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +112,8 @@ fn test_init_program_succeeds_with_any_token_when_list_empty() {
 fn test_schema_version_is_v1_after_init() {
     let env = Env::default();
     let (client, _admin) = setup_contract(&env);
+    // The marker is written by initialize_program, not contract setup.
+    init_with_token(&client, &env, &make_token(&env));
     assert_eq!(
         client.get_allowlist_schema_version(),
         TOKEN_ALLOWLIST_SCHEMA_VERSION_V1
@@ -114,6 +130,12 @@ fn test_schema_version_event_emitted_on_init() {
 
     env.ledger().with_mut(|li| li.timestamp = 9_000);
     client.initialize_contract(&admin);
+
+    // The schema marker is written by initialize_program, not contract setup.
+    let program_id = String::from_str(&env, "schema-prog");
+    let payout_key = Address::generate(&env);
+    let token = make_token(&env);
+    client.initialize_program(&program_id, &payout_key, &token, &admin, &None, &None);
 
     let events = env.events().all();
     let schema_event = events.iter().find(|e| {
@@ -351,7 +373,7 @@ fn test_init_program_succeeds_with_listed_token() {
 }
 
 #[test]
-#[should_panic(expected = "Token not on allowlist")]
+#[should_panic(expected = "Error(Contract, #1100)")] // ContractError::TokenNotAllowed
 fn test_init_program_rejected_with_unlisted_token() {
     let env = Env::default();
     let (client, _admin) = setup_contract(&env);
@@ -421,6 +443,14 @@ fn test_token_rejected_event_emitted_on_rejection() {
         &None,
     );
     assert!(result.is_err(), "init with unlisted token must fail");
+    match result {
+        Err(Ok(err)) => assert_eq!(
+            err.get_code(),
+            ContractError::TokenNotAllowed as u32,
+            "unlisted token must surface the named TokenNotAllowed error"
+        ),
+        other => panic!("expected ContractError::TokenNotAllowed, got {other:?}"),
+    }
 
     // Verify TokenRejectedEvent was emitted
     let events = env.events().all();
@@ -566,7 +596,7 @@ fn test_add_remove_add_same_token() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Token not on allowlist")]
+#[should_panic(expected = "Error(Contract, #1100)")] // ContractError::TokenNotAllowed
 fn test_initialize_program_alias_also_enforces_allowlist() {
     let env = Env::default();
     let (client, _admin) = setup_contract(&env);
@@ -653,12 +683,12 @@ fn test_token_decimals_are_immutable_after_a_payout() {
     // A Stellar Asset Contract reports seven decimals. Configure that scale,
     // make a real payout, then prove the historical scale cannot be changed.
     client.add_allowed_token_with_decimals(&token, &7);
-    assert_eq!(client.get_token_decimals(&token), Some(7));
+    assert_eq!(token_decimals(&client, &token), Some(7));
 
     let program_id = String::from_str(&env, "decimal-safety");
     let payout_key = Address::generate(&env);
     client.init_program(&program_id, &payout_key, &token, &payout_key, &None, &None);
-    client.publish_program();
+    client.publish_program(&program_id, &payout_key);
     let token_admin_client = token::StellarAssetClient::new(&env, &token);
     token_admin_client.mint(&client.address, &1_000);
     client.lock_program_funds(&1_000);
@@ -669,7 +699,7 @@ fn test_token_decimals_are_immutable_after_a_payout() {
         result.is_err(),
         "changing configured decimals must be rejected"
     );
-    assert_eq!(client.get_token_decimals(&token), Some(7));
+    assert_eq!(token_decimals(&client, &token), Some(7));
 }
 
 #[test]
@@ -681,7 +711,7 @@ fn test_decimal_mismatch_is_emitted_but_configuration_is_preserved() {
     // SAC's live decimals() is 7. An explicit application scale of 6 is
     // accepted but must be observable to downstream indexers.
     client.add_allowed_token_with_decimals(&token, &6);
-    assert_eq!(client.get_token_decimals(&token), Some(6));
+    assert_eq!(token_decimals(&client, &token), Some(6));
 
     let events = env.events().all();
     let event = events.iter().find(|e| {
@@ -690,6 +720,18 @@ fn test_decimal_mismatch_is_emitted_but_configuration_is_preserved() {
             symbol
                 .map(|symbol| symbol == Symbol::new(&env, "TkDecMis"))
                 .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+    assert!(event.is_some(), "a live-decimals mismatch must be flagged");
+    let payload: TokenDecimalsMismatchEvent = event.unwrap().2.try_into_val(&env).unwrap();
+    assert_eq!(payload.token, token);
+    assert_eq!(payload.configured_decimals, 6);
+    assert_eq!(payload.reported_decimals, 7);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DECIMAL NORMALIZATION TESTS  (issue #1295)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -731,7 +773,7 @@ fn test_get_token_decimals_returns_stored_value() {
     let token = make_token_dec(&env);
 
     client.add_allowed_token_with_decimals(&token, &18u32);
-    assert_eq!(client.get_token_decimals(&token), 18u32);
+    assert_eq!(token_decimals(&client, &token), Some(18u32));
 }
 
 #[test]
@@ -740,9 +782,9 @@ fn test_get_token_decimals_returns_zero_for_legacy_token() {
     let (client, _) = setup_contract(&env);
     let token = make_token_dec(&env);
 
-    // add via legacy path (no decimals)
+    // add via legacy path (no decimals) — scale is recorded as a known 0
     client.add_allowed_token(&token);
-    assert_eq!(client.get_token_decimals(&token), 0u32);
+    assert_eq!(token_decimals(&client, &token), Some(0u32));
 }
 
 #[test]
@@ -768,7 +810,7 @@ fn test_two_tokens_different_decimals_both_allowed() {
     let env = Env::default();
     let (client, _) = setup_contract(&env);
 
-    let usdc = make_token_dec(&env);   // 6 decimals (like USDC)
+    let usdc = make_token_dec(&env); // 6 decimals (like USDC)
     let custom = make_token_dec(&env); // 18 decimals (custom token)
 
     client.add_allowed_token_with_decimals(&usdc, &6u32);
@@ -802,17 +844,17 @@ fn test_decimals_stored_independently_per_token() {
     let env = Env::default();
     let (client, _) = setup_contract(&env);
 
-    let t6  = make_token_dec(&env);
-    let t7  = make_token_dec(&env);
+    let t6 = make_token_dec(&env);
+    let t7 = make_token_dec(&env);
     let t18 = make_token_dec(&env);
 
-    client.add_allowed_token_with_decimals(&t6,  &6u32);
-    client.add_allowed_token_with_decimals(&t7,  &7u32);
+    client.add_allowed_token_with_decimals(&t6, &6u32);
+    client.add_allowed_token_with_decimals(&t7, &7u32);
     client.add_allowed_token_with_decimals(&t18, &18u32);
 
-    assert_eq!(client.get_token_decimals(&t6),  6u32);
-    assert_eq!(client.get_token_decimals(&t7),  7u32);
-    assert_eq!(client.get_token_decimals(&t18), 18u32);
+    assert_eq!(token_decimals(&client, &t6), Some(6u32));
+    assert_eq!(token_decimals(&client, &t7), Some(7u32));
+    assert_eq!(token_decimals(&client, &t18), Some(18u32));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -834,7 +876,7 @@ fn test_add_token_with_max_decimals_succeeds() {
     let (client, _) = setup_contract(&env);
     let token = make_token_dec(&env);
     client.add_allowed_token_with_decimals(&token, &MAX_TOKEN_DECIMALS);
-    assert_eq!(client.get_token_decimals(&token), MAX_TOKEN_DECIMALS);
+    assert_eq!(token_decimals(&client, &token), Some(MAX_TOKEN_DECIMALS));
 }
 
 #[test]
@@ -843,7 +885,7 @@ fn test_add_token_with_zero_decimals_succeeds() {
     let (client, _) = setup_contract(&env);
     let token = make_token_dec(&env);
     client.add_allowed_token_with_decimals(&token, &0u32);
-    assert_eq!(client.get_token_decimals(&token), 0u32);
+    assert_eq!(token_decimals(&client, &token), Some(0u32));
 }
 
 #[test]
@@ -867,12 +909,12 @@ fn test_remove_token_clears_decimal_cache() {
     let token = make_token_dec(&env);
 
     client.add_allowed_token_with_decimals(&token, &6u32);
-    assert_eq!(client.get_token_decimals(&token), 6u32);
+    assert_eq!(token_decimals(&client, &token), Some(6u32));
 
     client.remove_allowed_token(&token);
 
-    // After removal, decimal cache must be cleared (returns 0)
-    assert_eq!(client.get_token_decimals(&token), 0u32);
+    // After removal, the stored scale must be cleared entirely
+    assert_eq!(token_decimals(&client, &token), None);
     assert_eq!(client.get_allowed_tokens_with_decimals().len(), 0);
 }
 
@@ -888,7 +930,7 @@ fn test_remove_one_of_two_tokens_preserves_other_decimals() {
 
     client.remove_allowed_token(&t1);
 
-    assert_eq!(client.get_token_decimals(&t2), 18u32);
+    assert_eq!(token_decimals(&client, &t2), Some(18u32));
     let list = client.get_allowed_tokens_with_decimals();
     assert_eq!(list.len(), 1);
     assert_eq!(list.get(0).unwrap().decimals, 18u32);
@@ -911,17 +953,12 @@ fn test_add_token_with_decimals_event_has_correct_decimals_field() {
     let ev = events.iter().find(|e| {
         if let Some(t0) = e.1.get(0) {
             let sym: Result<Symbol, _> = t0.try_into_val(&env);
-            sym.map(|s| s == Symbol::new(&env, "TkAllow")).unwrap_or(false)
+            sym.map(|s| s == Symbol::new(&env, "TkAllow"))
+                .unwrap_or(false)
         } else {
             false
         }
     });
-    assert!(event.is_some(), "a live-decimals mismatch must be flagged");
-    let payload: TokenDecimalsMismatchEvent = event.unwrap().2.try_into_val(&env).unwrap();
-    assert_eq!(payload.token, token);
-    assert_eq!(payload.configured_decimals, 6);
-    assert_eq!(payload.reported_decimals, 7);
-
     assert!(ev.is_some(), "TokenAllowlistUpdatedEvent must be emitted");
     let payload: TokenAllowlistUpdatedEvent = ev.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(payload.token, token);
@@ -944,7 +981,8 @@ fn test_remove_token_event_decimals_field_is_zero() {
     let ev = events.iter().rev().find(|e| {
         if let Some(t0) = e.1.get(0) {
             let sym: Result<Symbol, _> = t0.try_into_val(&env);
-            sym.map(|s| s == Symbol::new(&env, "TkAllow")).unwrap_or(false)
+            sym.map(|s| s == Symbol::new(&env, "TkAllow"))
+                .unwrap_or(false)
         } else {
             false
         }
@@ -992,7 +1030,7 @@ fn test_legacy_add_allowed_token_still_works_with_v2_list() {
     let env = Env::default();
     let (client, _) = setup_contract(&env);
     let t_legacy = make_token_dec(&env);
-    let t_new    = make_token_dec(&env);
+    let t_new = make_token_dec(&env);
 
     // Add one via legacy path, one via new path
     client.add_allowed_token(&t_legacy);
@@ -1011,4 +1049,304 @@ fn test_legacy_add_allowed_token_still_works_with_v2_list() {
     // New token has decimals = 6
     let new_entry = v2.iter().find(|e| e.token == t_new).unwrap();
     assert_eq!(new_entry.decimals, 6u32);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 21. Update hardening — duplicate & stale configuration
+//
+// Covers the cases called out in "Harden token allowlist updates against
+// duplicate and stale configuration":
+//   * duplicate remove (removing the same token twice)
+//   * immutable-scale re-add (duplicate add with a different scale)
+//   * last-token removal is auditable and re-disables enforcement
+//   * a rotated-out ("stale") admin can no longer mutate the allowlist
+//   * a payout on a program whose token was de-listed after init still succeeds
+//     (grandfathered — enforcement runs only at init_program time)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Find the most recent `TokenAllowlistUpdatedEvent` in the event log.
+fn last_allowlist_event(env: &Env) -> TokenAllowlistUpdatedEvent {
+    let events = env.events().all();
+    let ev = events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.1.get(0)
+                .and_then(|t0| {
+                    let s: Result<Symbol, _> = t0.try_into_val(env);
+                    s.ok()
+                })
+                .map(|s| s == Symbol::new(env, "TkAllow"))
+                .unwrap_or(false)
+        })
+        .expect("a TokenAllowlistUpdatedEvent must have been emitted");
+    ev.2.try_into_val(env).unwrap()
+}
+
+/// Removing the same token twice must fail the second time. The allowlist is
+/// the canonical record, so a "remove" that changes nothing is a caller error,
+/// not a silent no-op.
+#[test]
+#[should_panic(expected = "Token not in allowlist")]
+fn test_remove_same_token_twice_panics() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let token = make_token(&env);
+
+    client.add_allowed_token(&token);
+    client.remove_allowed_token(&token);
+    client.remove_allowed_token(&token); // second remove must panic
+}
+
+/// The `try_` form of a duplicate remove surfaces an error and leaves the list
+/// unchanged.
+#[test]
+fn test_duplicate_remove_is_error_and_leaves_state_canonical() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let keep = make_token(&env);
+    let token = make_token(&env);
+
+    client.add_allowed_token(&keep);
+    client.add_allowed_token(&token);
+    client.remove_allowed_token(&token);
+
+    assert!(client.try_remove_allowed_token(&token).is_err());
+
+    let list = client.get_allowed_tokens();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list.get(0).unwrap(), keep);
+    assert!(client.is_token_allowed(&keep));
+    assert!(!client.is_token_allowed(&token));
+}
+
+/// A duplicate add that carries a *different* decimal scale is rejected as an
+/// immutability violation — it is never treated as an in-place update.
+#[test]
+#[should_panic(expected = "Token decimals are immutable")]
+fn test_duplicate_add_with_different_decimals_is_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let token = make_token_dec(&env);
+
+    client.add_allowed_token_with_decimals(&token, &6u32);
+    client.add_allowed_token_with_decimals(&token, &7u32); // must panic
+}
+
+/// Duplicate adds (same scale or different) never mutate stored state.
+#[test]
+fn test_duplicate_add_leaves_state_canonical() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let token = make_token_dec(&env);
+
+    client.add_allowed_token_with_decimals(&token, &6u32);
+    let before = client.get_allowed_tokens_with_decimals().len();
+
+    assert!(client
+        .try_add_allowed_token_with_decimals(&token, &6u32)
+        .is_err());
+    assert!(client
+        .try_add_allowed_token_with_decimals(&token, &9u32)
+        .is_err());
+
+    assert_eq!(client.get_allowed_tokens_with_decimals().len(), before);
+    assert_eq!(token_decimals(&client, &token), Some(6u32));
+}
+
+/// Removing the last token disables enforcement and the change is auditable via
+/// `TokenAllowlistUpdatedEvent { added: false, .. }` attributed to the admin.
+#[test]
+fn test_remove_last_token_disables_enforcement_and_is_audited() {
+    let env = Env::default();
+    let (client, admin) = setup_contract(&env);
+    let token = make_token(&env);
+
+    client.add_allowed_token(&token);
+
+    env.ledger().with_mut(|li| li.timestamp = 123_456);
+    client.remove_allowed_token(&token);
+
+    assert_eq!(client.get_allowed_tokens().len(), 0);
+    let other = make_token(&env);
+    assert!(
+        client.is_token_allowed(&other),
+        "empty list must re-disable enforcement"
+    );
+
+    let payload = last_allowlist_event(&env);
+    assert!(!payload.added, "removal event must have added = false");
+    assert_eq!(payload.token, token);
+    assert_eq!(payload.updated_by, admin);
+    assert_eq!(payload.timestamp, 123_456);
+}
+
+/// After a two-step-free admin rotation, the rotated-out admin's authorization
+/// no longer satisfies the allowlist guard.
+#[test]
+#[should_panic]
+fn test_stale_admin_cannot_update_allowlist_after_rotation() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize_contract(&old_admin);
+    client.set_admin(&new_admin);
+
+    let token = make_token(&env);
+
+    // Only the *previous* admin signs — the guard now requires `new_admin`.
+    client
+        .mock_auths(&[MockAuth {
+            address: &old_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "add_allowed_token",
+                args: (token.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .add_allowed_token(&token);
+}
+
+/// A stale admin is likewise rejected from removing a token.
+#[test]
+#[should_panic]
+fn test_stale_admin_cannot_remove_allowed_token_after_rotation() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize_contract(&old_admin);
+    let token = make_token(&env);
+    client.add_allowed_token(&token);
+    client.set_admin(&new_admin);
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &old_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "remove_allowed_token",
+                args: (token.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .remove_allowed_token(&token);
+}
+
+/// The current (post-rotation) admin can still update the allowlist, and the
+/// event attributes the change to that new admin.
+#[test]
+fn test_current_admin_can_update_allowlist_after_rotation() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize_contract(&old_admin);
+    client.set_admin(&new_admin);
+
+    let token = make_token(&env);
+    client.add_allowed_token(&token);
+
+    assert!(client.is_token_allowed(&token));
+    assert_eq!(last_allowlist_event(&env).updated_by, new_admin);
+}
+
+/// A program initialized while its token was allowed keeps paying out its
+/// locked funds even after the token is removed from the allowlist. Enforcement
+/// is at `init_program` time only, so a later policy change cannot strand funds.
+#[test]
+fn test_payout_succeeds_after_token_removed_from_allowlist() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token = sac.address();
+
+    client.add_allowed_token_with_decimals(&token, &7u32);
+    // Sentinel keeps enforcement active after the target token is removed
+    // (an empty list disables enforcement, making every token allowed).
+    let sentinel = make_token(&env);
+    client.add_allowed_token(&sentinel);
+
+    let program_id = String::from_str(&env, "grandfathered");
+    let payout_key = Address::generate(&env);
+    client.init_program(&program_id, &payout_key, &token, &payout_key, &None, &None);
+    client.publish_program(&program_id, &payout_key);
+
+    let sac_admin = token::StellarAssetClient::new(&env, &token);
+    sac_admin.mint(&client.address, &1_000);
+    client.lock_program_funds(&1_000);
+
+    // Policy change after the program is already live.
+    client.remove_allowed_token(&token);
+    assert!(!client.is_token_allowed(&token));
+    assert_eq!(token_decimals(&client, &token), None);
+
+    // The existing program can still disburse its locked balance.
+    let recipient = Address::generate(&env);
+    client.single_payout(&recipient, &100, &None);
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&recipient),
+        100,
+        "grandfathered program must still be able to pay out"
+    );
+}
+
+/// The de-listed token can no longer initialize a *new* program while the
+/// allowlist stays non-empty.
+#[test]
+#[should_panic(expected = "Error(Contract, #1100)")] // ContractError::TokenNotAllowed
+fn test_new_program_rejected_after_token_removed() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let token = make_token(&env);
+    let keep = make_token(&env);
+
+    client.add_allowed_token(&token);
+    client.add_allowed_token(&keep); // keeps enforcement on after the removal
+    client.remove_allowed_token(&token);
+
+    init_with_token(&client, &env, &token); // must panic
+}
+
+/// Adding a new token to the allowlist after a program is live does not disturb
+/// that program's stored configuration or its ability to pay out.
+#[test]
+fn test_adding_token_after_init_does_not_affect_existing_program() {
+    let env = Env::default();
+    let (client, _admin) = setup_contract(&env);
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token = sac.address();
+
+    client.add_allowed_token_with_decimals(&token, &7u32);
+
+    let program_id = String::from_str(&env, "stable-cfg");
+    let payout_key = Address::generate(&env);
+    client.init_program(&program_id, &payout_key, &token, &payout_key, &None, &None);
+    client.publish_program(&program_id, &payout_key);
+
+    let sac_admin = token::StellarAssetClient::new(&env, &token);
+    sac_admin.mint(&client.address, &1_000);
+    client.lock_program_funds(&1_000);
+
+    // Unrelated allowlist growth.
+    let another = make_token(&env);
+    client.add_allowed_token_with_decimals(&another, &6u32);
+
+    let recipient = Address::generate(&env);
+    client.single_payout(&recipient, &250, &None);
+    assert_eq!(token::Client::new(&env, &token).balance(&recipient), 250);
+    assert_eq!(token_decimals(&client, &token), Some(7u32));
 }

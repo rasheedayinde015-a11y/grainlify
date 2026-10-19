@@ -1,6 +1,14 @@
 # View Facade
 
-A **read-only aggregation contract** for the Grainlify ecosystem on Stellar/Soroban.
+## Deployment status and crate relationships
+
+No network deployment or contract ID is recorded for this facade in the repository. The deployment command below is an instruction, not evidence of a live instance.
+
+- Depends on: [grainlify-core](../grainlify-core/README.md) and [program-escrow](../program-escrow/README.md) through Cargo path dependencies. It queries a supplied program-escrow contract address at runtime.
+- Depended on by: no other in-repository Cargo package declares a dependency on view-facade.
+- Unlike [escrow-view-facade](../escrow-view-facade/README.md), this facade maintains a contract registry and program-oriented query adapters; it does not build bounty summaries.
+
+A contract registry and read-focused query facade for the Grainlify ecosystem on Stellar/Soroban.
 
 ## Purpose
 
@@ -100,6 +108,12 @@ Emitted once when `init` succeeds.
 | `NotInitialized` | 2 | `register` or `deregister` called before `init` |
 
 ## Testing
+
+This facade includes regression coverage for the cross-contract safety checks introduced in issue #1731:
+
+- `src/test_cross_contract_safety.rs` verifies no-auth read access, immutable admin semantics, and admin-only mutations.
+- `src/tests/query_adapters_tests.rs` checks missing-record handling and adapters that must fail closed rather than silently masking contract errors.
+- These tests are designed to catch ABI drift and authorization drift before a facade release is merged.
 
 Run the full test suite from the `contracts/` workspace:
 

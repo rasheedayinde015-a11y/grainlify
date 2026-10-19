@@ -1,0 +1,17 @@
+name: Entry Point Coverage Check
+
+on:
+  workflow_dispatch:
+jobs:
+  check-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Run coverage check
+        run: python scripts/check_coverage.py

@@ -1,3 +1,5 @@
+extern crate std;
+
 use crate::*;
 use soroban_sdk::{testutils::Address as _, token, Address, Env, String, Vec as SdkVec};
 
@@ -26,6 +28,7 @@ struct Setup {
     backend: Address,
     escrow: ProgramEscrowContractClient<'static>,
     token: token::Client<'static>,
+    token_admin: token::StellarAssetClient<'static>,
 }
 
 impl Setup {
@@ -45,6 +48,7 @@ impl Setup {
             backend,
             escrow,
             token,
+            token_admin,
         }
     }
 }
@@ -71,12 +75,11 @@ fn test_program_metadata_set_on_creation() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
-    let retrieved = s.escrow.get_program_metadata(&program_id);
+    let retrieved = s.escrow.get_program_metadata(&program_id).unwrap();
     assert_eq!(
         retrieved.program_name,
         Some(String::from_str(&s.env, "Hackathon"))
@@ -84,7 +87,6 @@ fn test_program_metadata_set_on_creation() {
 }
 
 #[test]
-#[ignore = "Program metadata query functionality to be implemented - Issue #63"]
 fn test_query_programs_by_type() {
     let s = Setup::new();
 
@@ -108,8 +110,7 @@ fn test_query_programs_by_type() {
             &program_id,
             &s.backend,
             &s.token.address,
-            &s.organizer,
-            &None,
+            &Some(s.organizer.clone()),
             &Some(metadata.clone()),
         );
     }
@@ -128,7 +129,6 @@ fn test_query_programs_by_type() {
 }
 
 #[test]
-#[ignore = "Program metadata query functionality to be implemented - Issue #63"]
 fn test_query_programs_by_ecosystem() {
     let s = Setup::new();
 
@@ -152,8 +152,7 @@ fn test_query_programs_by_ecosystem() {
             &program_id,
             &s.backend,
             &s.token.address,
-            &s.organizer,
-            &None,
+            &Some(s.organizer.clone()),
             &Some(metadata.clone()),
         );
     }
@@ -166,7 +165,6 @@ fn test_query_programs_by_ecosystem() {
 }
 
 #[test]
-#[ignore = "Program metadata query functionality to be implemented - Issue #63"]
 fn test_query_programs_by_tags() {
     let s = Setup::new();
 
@@ -196,8 +194,7 @@ fn test_query_programs_by_tags() {
             &program_id,
             &s.backend,
             &s.token.address,
-            &s.organizer,
-            &None,
+            &Some(s.organizer.clone()),
             &Some(metadata.clone()),
         );
     }
@@ -220,7 +217,6 @@ fn test_query_programs_by_tags() {
 // ============================================================================
 
 #[test]
-#[ignore = "Program metadata functionality to be implemented - Issue #63"]
 fn test_metadata_persists_through_lifecycle() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "LifecycleTest");
@@ -241,13 +237,15 @@ fn test_metadata_persists_through_lifecycle() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &Some(prize_pool),
+        &Some(s.organizer.clone()),
         &Some(metadata.clone()),
     );
+    s.escrow.publish_program(&program_id, &s.backend);
+    s.token_admin.mint(&s.escrow.address, &prize_pool);
+    s.escrow.lock_program_funds(&prize_pool);
 
     // Verify metadata after initialization
-    let after_init = s.escrow.get_program_metadata(&program_id);
+    let after_init = s.escrow.get_program_metadata(&program_id).unwrap();
     assert_eq!(
         after_init.program_name,
         Some(String::from_str(&s.env, "Lifecycle Test Program"))
@@ -263,7 +261,7 @@ fn test_metadata_persists_through_lifecycle() {
     s.escrow.batch_payout(&winners, &amounts);
 
     // Verify metadata persists after payout
-    let after_payout = s.escrow.get_program_metadata(&program_id);
+    let after_payout = s.escrow.get_program_metadata(&program_id).unwrap();
     assert_eq!(
         after_payout.program_name,
         Some(String::from_str(&s.env, "Lifecycle Test Program"))
@@ -279,7 +277,6 @@ fn test_metadata_persists_through_lifecycle() {
 // ============================================================================
 
 #[test]
-#[ignore = "Program metadata functionality to be implemented - Issue #63"]
 fn test_program_custom_fields() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "CustomFieldsTest");
@@ -313,13 +310,12 @@ fn test_program_custom_fields() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata.clone()),
     );
 
     // Retrieve and verify custom fields
-    let retrieved = s.escrow.get_program_metadata(&program_id);
+    let retrieved = s.escrow.get_program_metadata(&program_id).unwrap();
     assert_eq!(retrieved.custom_fields.len(), 3);
 
     let field_0 = retrieved.custom_fields.get(0).unwrap();
@@ -332,7 +328,6 @@ fn test_program_custom_fields() {
 // ============================================================================
 
 #[test]
-#[ignore = "Program metadata functionality to be implemented - Issue #63"]
 fn test_program_metadata_serialization() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdateTest");
@@ -341,10 +336,11 @@ fn test_program_metadata_serialization() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &None,
     );
+    // Metadata updates are rejected while the program is still in Draft.
+    s.escrow.publish_program(&program_id, &s.backend);
 
     let metadata = ProgramMetadata {
         program_name: Some(String::from_str(&s.env, "Updated")),
@@ -356,8 +352,9 @@ fn test_program_metadata_serialization() {
         custom_fields: SdkVec::new(&s.env),
     };
 
-    s.escrow.update_program_metadata(&program_id, &s.backend, &metadata);
-    let retrieved = s.escrow.get_program_metadata(&program_id);
+    s.escrow
+        .update_program_metadata(&program_id, &s.backend, &metadata);
+    let retrieved = s.escrow.get_program_metadata(&program_id).unwrap();
     assert_eq!(
         retrieved.program_name,
         Some(String::from_str(&s.env, "Updated"))
@@ -443,8 +440,7 @@ fn test_compress_known_keys_through_storage() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
@@ -477,8 +473,7 @@ fn test_compress_mixed_keys_through_storage() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
@@ -519,8 +514,7 @@ fn test_compress_empty_custom_fields_through_storage() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata.clone()),
     );
 
@@ -545,8 +539,7 @@ fn test_compress_round_trip_through_update() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
@@ -623,8 +616,7 @@ fn test_compress_long_custom_key() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
@@ -655,8 +647,7 @@ fn test_compress_special_chars_in_key() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
@@ -678,8 +669,7 @@ fn test_compress_case_sensitivity() {
         &program_id,
         &s.backend,
         &s.token.address,
-        &s.organizer,
-        &None,
+        &Some(s.organizer.clone()),
         &Some(metadata),
     );
 
@@ -746,7 +736,11 @@ fn test_init_accept_max_program_metadata_custom_fields() {
     let program_id = String::from_str(&s.env, "InitMaxSoftFields");
     let metadata = metadata_with_n_fields(&s.env, MAX_PROGRAM_METADATA_CUSTOM_FIELDS);
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &Some(metadata),
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
     );
     let retrieved = s.escrow.get_program_metadata(&program_id);
     assert!(retrieved.is_some());
@@ -763,7 +757,11 @@ fn test_init_reject_over_soft_limit_custom_fields() {
     let program_id = String::from_str(&s.env, "InitOverSoft");
     let metadata = metadata_with_n_fields(&s.env, MAX_PROGRAM_METADATA_CUSTOM_FIELDS + 1);
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &Some(metadata),
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
     );
 }
 
@@ -772,11 +770,16 @@ fn test_update_accept_max_program_metadata_custom_fields() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdMaxSoft");
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &None,
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
     );
     s.escrow.publish_program(&program_id, &s.backend);
     let metadata = metadata_with_n_fields(&s.env, MAX_PROGRAM_METADATA_CUSTOM_FIELDS);
-    s.escrow.update_program_metadata_by(&program_id, &s.backend, &metadata);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
     let retrieved = s.escrow.get_program_metadata(&program_id);
     assert!(retrieved.is_some());
     assert_eq!(
@@ -791,11 +794,16 @@ fn test_update_reject_over_soft_limit_custom_fields() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdOverSoft");
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &None,
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
     );
     s.escrow.publish_program(&program_id, &s.backend);
     let metadata = metadata_with_n_fields(&s.env, MAX_PROGRAM_METADATA_CUSTOM_FIELDS + 1);
-    s.escrow.update_program_metadata_by(&program_id, &s.backend, &metadata);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
 }
 
 // ── Key-length boundary (MAX_CUSTOM_FIELD_KEY_LEN = 64) ──
@@ -806,7 +814,11 @@ fn test_init_accept_max_key_len() {
     let program_id = String::from_str(&s.env, "InitMaxKeyLen");
     let metadata = metadata_with_key_value_len(&s.env, MAX_CUSTOM_FIELD_KEY_LEN, 1);
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &Some(metadata),
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
     );
     let retrieved = s.escrow.get_program_metadata(&program_id);
     assert!(retrieved.is_some());
@@ -820,7 +832,11 @@ fn test_init_reject_over_key_len() {
     let program_id = String::from_str(&s.env, "InitOverKeyLen");
     let metadata = metadata_with_key_value_len(&s.env, MAX_CUSTOM_FIELD_KEY_LEN + 1, 1);
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &Some(metadata),
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
     );
 }
 
@@ -829,11 +845,16 @@ fn test_update_accept_max_key_len() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdMaxKeyLen");
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &None,
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
     );
     s.escrow.publish_program(&program_id, &s.backend);
     let metadata = metadata_with_key_value_len(&s.env, MAX_CUSTOM_FIELD_KEY_LEN, 1);
-    s.escrow.update_program_metadata_by(&program_id, &s.backend, &metadata);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
     let retrieved = s.escrow.get_program_metadata(&program_id);
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().custom_fields.len(), 1);
@@ -845,11 +866,16 @@ fn test_update_reject_over_key_len() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdOverKeyLen");
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &None,
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
     );
     s.escrow.publish_program(&program_id, &s.backend);
     let metadata = metadata_with_key_value_len(&s.env, MAX_CUSTOM_FIELD_KEY_LEN + 1, 1);
-    s.escrow.update_program_metadata_by(&program_id, &s.backend, &metadata);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
 }
 
 // ── Value-length boundary (MAX_CUSTOM_FIELD_VALUE_LEN = 256) ──
@@ -860,7 +886,11 @@ fn test_init_accept_max_value_len() {
     let program_id = String::from_str(&s.env, "InitMaxValLen");
     let metadata = metadata_with_key_value_len(&s.env, 1, MAX_CUSTOM_FIELD_VALUE_LEN);
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &Some(metadata),
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
     );
     let retrieved = s.escrow.get_program_metadata(&program_id);
     assert!(retrieved.is_some());
@@ -874,7 +904,11 @@ fn test_init_reject_over_value_len() {
     let program_id = String::from_str(&s.env, "InitOverValLen");
     let metadata = metadata_with_key_value_len(&s.env, 1, MAX_CUSTOM_FIELD_VALUE_LEN + 1);
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &Some(metadata),
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
     );
 }
 
@@ -883,11 +917,16 @@ fn test_update_accept_max_value_len() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdMaxValLen");
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &None,
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
     );
     s.escrow.publish_program(&program_id, &s.backend);
     let metadata = metadata_with_key_value_len(&s.env, 1, MAX_CUSTOM_FIELD_VALUE_LEN);
-    s.escrow.update_program_metadata_by(&program_id, &s.backend, &metadata);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
     let retrieved = s.escrow.get_program_metadata(&program_id);
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().custom_fields.len(), 1);
@@ -899,11 +938,16 @@ fn test_update_reject_over_value_len() {
     let s = Setup::new();
     let program_id = String::from_str(&s.env, "UpdOverValLen");
     s.escrow.init_program_with_metadata(
-        &program_id, &s.backend, &s.token.address, &s.organizer, &None, &None,
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
     );
     s.escrow.publish_program(&program_id, &s.backend);
     let metadata = metadata_with_key_value_len(&s.env, 1, MAX_CUSTOM_FIELD_VALUE_LEN + 1);
-    s.escrow.update_program_metadata_by(&program_id, &s.backend, &metadata);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
 }
 
 // ── Shared validation function direct tests ──
@@ -951,4 +995,386 @@ fn test_shared_validation_rejects_over_value_len() {
     let env = Env::default();
     let metadata = metadata_with_key_value_len(&env, 1, MAX_CUSTOM_FIELD_VALUE_LEN + 1);
     validate_metadata_custom_fields(&metadata);
+}
+
+// ============================================================================
+// Issue #1737: Comprehensive metadata size and encoding limit tests
+// ============================================================================
+
+// ── Empty metadata ──────────────────────────────────────────────────────────
+
+/// Empty metadata (all None, no tags, no custom fields) is valid.
+#[test]
+fn test_empty_metadata_accepted_on_init() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "EmptyMetaInit");
+    let metadata = ProgramMetadata::empty(&s.env);
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
+    );
+    let retrieved = s.escrow.get_program_metadata(&program_id);
+    assert!(retrieved.is_some());
+    let m = retrieved.unwrap();
+    assert_eq!(m.program_name, None);
+    assert_eq!(m.custom_fields.len(), 0);
+}
+
+/// Empty metadata accepted on update (replaces existing).
+#[test]
+fn test_empty_metadata_accepted_on_update() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "EmptyMetaUpd");
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
+    );
+    s.escrow.publish_program(&program_id, &s.backend);
+
+    // First set some metadata
+    let metadata = metadata_with_n_fields(&s.env, 3);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
+
+    // Then replace with empty
+    let empty = ProgramMetadata::empty(&s.env);
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &empty);
+
+    let retrieved = s.escrow.get_program_metadata(&program_id);
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap().custom_fields.len(), 0);
+}
+
+/// None metadata on init (skips metadata storage entirely).
+#[test]
+fn test_none_metadata_accepted_on_init() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "NoneMetaInit");
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
+    );
+    let retrieved = s.escrow.get_program_metadata(&program_id);
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap().custom_fields.len(), 0);
+}
+
+// ── Aggregate size boundary ────────────────────────────────────────────────
+
+/// Build metadata with `n` fields, each contributing `key_len + value_len`
+/// bytes toward the aggregate ceiling.
+fn metadata_with_aggregate_bytes(
+    env: &Env,
+    n_fields: u32,
+    key_len: usize,
+    value_len: usize,
+) -> ProgramMetadata {
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(env);
+    // Fixed-size buffers (max 513 bytes); we slice to the requested length.
+    let key_buf = [b'k'; 513];
+    let val_buf = [b'v'; 513];
+    let key_str = core::str::from_utf8(&key_buf[..key_len]).unwrap();
+    let val_str = core::str::from_utf8(&val_buf[..value_len]).unwrap();
+    for _ in 0..n_fields {
+        custom_fields.push_back(ProgramMetadataField {
+            key: String::from_str(env, key_str),
+            value: String::from_str(env, val_str),
+        });
+    }
+    ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    }
+}
+
+/// Exactly at the aggregate limit is accepted.
+#[test]
+fn test_shared_validation_accepts_at_aggregate_limit() {
+    let env = Env::default();
+    // 10 fields × (64 + 256) = 3200 bytes — well within 10 240.
+    let metadata = metadata_with_aggregate_bytes(&env, 10, 64, 256);
+    validate_metadata_custom_fields(&metadata);
+}
+
+/// Exceeding the aggregate limit is rejected.
+#[test]
+#[should_panic(expected = "MetadataAggregateSizeExceeded")]
+fn test_shared_validation_rejects_over_aggregate_limit() {
+    let env = Env::default();
+    // 33 fields × (64 + 256) = 10 560 bytes > 10 240.
+    // But 33 > MAX_CUSTOM_FIELDS (20), so we need to use exactly 20 fields
+    // with oversized values to hit aggregate without hitting field count first.
+    // 20 fields × (1 + 513) = 10 280 bytes > 10 240.
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(&env);
+    let val_buf = [b'v'; 513];
+    let val_str = core::str::from_utf8(&val_buf[..]).unwrap();
+    for _ in 0..20 {
+        custom_fields.push_back(ProgramMetadataField {
+            key: String::from_str(&env, "k"),
+            value: String::from_str(&env, val_str),
+        });
+    }
+    let metadata = ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    };
+    validate_metadata_custom_fields(&metadata);
+}
+
+/// Exactly at aggregate limit (20 fields × 512 bytes = 10 240).
+#[test]
+fn test_shared_validation_accepts_exactly_at_aggregate_limit() {
+    let env = Env::default();
+    // 20 fields × (1 + 511) = 10 240 bytes = MAX_METADATA_AGGREGATE_BYTES.
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(&env);
+    let val_buf = [b'v'; 511];
+    let val_str = core::str::from_utf8(&val_buf[..]).unwrap();
+    for _ in 0..20 {
+        custom_fields.push_back(ProgramMetadataField {
+            key: String::from_str(&env, "k"),
+            value: String::from_str(&env, val_str),
+        });
+    }
+    let metadata = ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    };
+    validate_metadata_custom_fields(&metadata);
+}
+
+/// Aggregate size check via init_program_with_metadata entrypoint.
+#[test]
+#[should_panic(expected = "MetadataAggregateSizeExceeded")]
+fn test_init_rejects_over_aggregate_limit() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "InitOverAgg");
+    // 20 fields × (1 + 513) = 10 280 > 10 240.
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(&s.env);
+    let val_buf = [b'v'; 513];
+    let val_str = core::str::from_utf8(&val_buf[..]).unwrap();
+    for _ in 0..20 {
+        custom_fields.push_back(ProgramMetadataField {
+            key: String::from_str(&s.env, "k"),
+            value: String::from_str(&s.env, val_str),
+        });
+    }
+    let metadata = ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&s.env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    };
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
+    );
+}
+
+/// Aggregate size check via update_program_metadata entrypoint.
+#[test]
+#[should_panic(expected = "MetadataAggregateSizeExceeded")]
+fn test_update_rejects_over_aggregate_limit() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "UpdOverAgg");
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
+    );
+    s.escrow.publish_program(&program_id, &s.backend);
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(&s.env);
+    let val_buf = [b'v'; 513];
+    let val_str = core::str::from_utf8(&val_buf[..]).unwrap();
+    for _ in 0..20 {
+        custom_fields.push_back(ProgramMetadataField {
+            key: String::from_str(&s.env, "k"),
+            value: String::from_str(&s.env, val_str),
+        });
+    }
+    let metadata = ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&s.env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    };
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &metadata);
+}
+
+// ── Duplicate keys ─────────────────────────────────────────────────────────
+
+/// Duplicate keys in custom_fields are accepted (Soroban Vec allows them).
+/// The contract does not deduplicate; consumers handle semantics.
+#[test]
+fn test_duplicate_keys_accepted() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "DupKeys");
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(&s.env);
+    // Add 3 fields with the same key "dup_key"
+    for _ in 0..3 {
+        custom_fields.push_back(ProgramMetadataField {
+            key: String::from_str(&s.env, "dup_key"),
+            value: String::from_str(&s.env, "val"),
+        });
+    }
+    let metadata = ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&s.env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    };
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &Some(metadata),
+    );
+    let retrieved = s.escrow.get_program_metadata(&program_id);
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap().custom_fields.len(), 3);
+}
+
+// ── UTF-8 handling ─────────────────────────────────────────────────────────
+
+/// Multi-byte UTF-8 (e.g. emoji, CJK) is accepted and counts correctly as bytes.
+#[test]
+fn test_multibyte_utf8_accepted() {
+    let env = Env::default();
+    // "🎉" is 4 bytes in UTF-8.
+    let metadata = metadata_with_key_value_len(&env, 4, 4);
+    validate_metadata_custom_fields(&metadata);
+    // Build with emoji content
+    let mut custom_fields: Vec<ProgramMetadataField> = Vec::new(&env);
+    custom_fields.push_back(ProgramMetadataField {
+        key: String::from_str(&env, "🎉🔑"),
+        value: String::from_str(&env, "值データ"),
+    });
+    let metadata = ProgramMetadata {
+        program_name: None,
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&env),
+        start_date: None,
+        end_date: None,
+        custom_fields,
+    };
+    validate_metadata_custom_fields(&metadata);
+}
+
+// ── Update replaces (does not merge) ───────────────────────────────────────
+
+/// update_program_metadata replaces metadata entirely, not merging.
+#[test]
+fn test_update_replaces_not_merges() {
+    let s = Setup::new();
+    let program_id = String::from_str(&s.env, "ReplaceNotMerge");
+    s.escrow.init_program_with_metadata(
+        &program_id,
+        &s.backend,
+        &s.token.address,
+        &Some(s.organizer.clone()),
+        &None,
+    );
+    s.escrow.publish_program(&program_id, &s.backend);
+
+    // Set initial metadata with 3 fields
+    let mut fields1: Vec<ProgramMetadataField> = Vec::new(&s.env);
+    for i in 0..3 {
+        fields1.push_back(ProgramMetadataField {
+            key: String::from_str(&s.env, &std::format!("key_{}", i)),
+            value: String::from_str(&s.env, &std::format!("val_{}", i)),
+        });
+    }
+    let meta1 = ProgramMetadata {
+        program_name: Some(String::from_str(&s.env, "First")),
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&s.env),
+        start_date: None,
+        end_date: None,
+        custom_fields: fields1,
+    };
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &meta1);
+    let r1 = s.escrow.get_program_metadata(&program_id).unwrap();
+    assert_eq!(r1.custom_fields.len(), 3);
+    assert_eq!(r1.program_name, Some(String::from_str(&s.env, "First")));
+
+    // Replace with 1 field — old fields must NOT persist
+    let mut fields2: Vec<ProgramMetadataField> = Vec::new(&s.env);
+    fields2.push_back(ProgramMetadataField {
+        key: String::from_str(&s.env, "only_key"),
+        value: String::from_str(&s.env, "only_val"),
+    });
+    let meta2 = ProgramMetadata {
+        program_name: Some(String::from_str(&s.env, "Second")),
+        program_type: None,
+        ecosystem: None,
+        tags: Vec::new(&s.env),
+        start_date: None,
+        end_date: None,
+        custom_fields: fields2,
+    };
+    s.escrow
+        .update_program_metadata_by(&program_id, &s.backend, &meta2);
+    let r2 = s.escrow.get_program_metadata(&program_id).unwrap();
+    assert_eq!(r2.custom_fields.len(), 1);
+    assert_eq!(
+        r2.custom_fields.get(0).unwrap().key,
+        String::from_str(&s.env, "only_key")
+    );
+    assert_eq!(r2.program_name, Some(String::from_str(&s.env, "Second")));
+}
+
+// ── Storage cost documentation ─────────────────────────────────────────────
+
+/// Verify constants are accessible from tests for documentation.
+#[test]
+fn test_limit_constants_are_public_and_accessible() {
+    // These assertions document the actual limit values.
+    assert_eq!(MAX_CUSTOM_FIELDS, 20);
+    assert_eq!(MAX_CUSTOM_FIELD_KEY_LEN, 64);
+    assert_eq!(MAX_CUSTOM_FIELD_VALUE_LEN, 256);
+    assert_eq!(MAX_METADATA_AGGREGATE_BYTES, 10_240);
+    assert_eq!(MAX_PROGRAM_METADATA_CUSTOM_FIELDS, 10);
 }

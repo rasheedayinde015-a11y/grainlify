@@ -6,25 +6,19 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# `contract` gates the on-chain server implementation (the `#[contractimpl]`
+# impl in src/lib.rs). Downstream contracts that depend on this crate with
+# `default-features = false` (the facades) must NOT pull in the server, or its
+# force-exported entrypoints collide with their own ABI at link time.
+default = ["contract"]
+contract = []
+
 [dependencies]
-soroban-sdk = "=21.7.7"
+soroban-sdk = { workspace = true }
 grainlify-core = { path = "../grainlify-core", default-features = false }
-ethnum = "1.5"
+ethnum = { workspace = true }
 
 [dev-dependencies]
-soroban-sdk = { version = "=21.7.7", features = ["testutils"] }
+soroban-sdk = { workspace = true, features = ["testutils"] }
 proptest = "1.4"
-
-[profile.release]
-overflow-checks = true
-opt-level = "z"
-debug = 0
-strip = "symbols"
-debug-assertions = false
-panic = "abort"
-codegen-units = 1
-lto = true
-
-[profile.test]
-overflow-checks = true
-debug = 0
